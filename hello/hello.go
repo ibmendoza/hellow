@@ -8,6 +8,10 @@ import (
 	"github.com/jackc/pgx/v4"
 )
 
+var secrets struct {
+	Connstring string //postgres
+}
+
 // Welcome to Encore!
 // This is a simple "Hello World" project to get you started.
 //
@@ -22,7 +26,8 @@ import (
 //
 //encore:api public path=/hello/:name
 func World(ctx context.Context, name string) (*Response, error) {
-	connstring := os.Getenv("connstring")
+	//connstring := os.Getenv("connstring")
+	connstring := secrets.Connstring
 
 	// Attempt to connect
 	config, err := pgx.ParseConfig(os.ExpandEnv(connstring))
