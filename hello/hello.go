@@ -36,6 +36,8 @@ var secrets struct {
 func World(ctx context.Context, name string) (*Response, error) {
 	//log.Println(string(rootCert))
 	rootCAs := x509.NewCertPool()
+	
+	log.Println(secrets.RootCert)
 
 	// Append the embedded root certificate to the certificate pool
 	//if !rootCAs.AppendCertsFromPEM(rootCert)) {
