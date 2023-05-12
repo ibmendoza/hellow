@@ -2,14 +2,22 @@ package hello
 
 import (
 	"context"
+	"crypto/x509"
+	_ "embed"
 	"log"
 	"os"
 
 	"github.com/jackc/pgx/v4"
 )
 
+/*
+//go:embed root.pem
+var rootCert []byte
+*/
+
 var secrets struct {
 	Connstring string //postgres
+	RootCert   string //convert to byte
 }
 
 // Welcome to Encore!
@@ -26,6 +34,15 @@ var secrets struct {
 //
 //encore:api public path=/hello/:name
 func World(ctx context.Context, name string) (*Response, error) {
+	//log.Println(string(rootCert))
+	rootCAs := x509.NewCertPool()
+
+	// Append the embedded root certificate to the certificate pool
+	//if !rootCAs.AppendCertsFromPEM(rootCert)) {
+	if !rootCAs.AppendCertsFromPEM([]byte(secrets.RootCert)) {
+		log.Fatalf("Failed to append root certificate to the pool")
+	}
+
 	//connstring := os.Getenv("connstring")
 	connstring := secrets.Connstring
 
@@ -34,6 +51,13 @@ func World(ctx context.Context, name string) (*Response, error) {
 	if err != nil {
 		log.Fatal("error configuring the database: ", err)
 	}
+
+	//you download root.crt from your cockroachlabs account
+	//root.crt is at $HOME/postgresql
+	//openssl x509 -in root.crt -out root.pem
+
+	config.TLSConfig.RootCAs = rootCAs
+
 	conn, err := pgx.ConnectConfig(context.Background(), config)
 	if err != nil {
 		log.Fatal("error connecting to the database: ", err)
@@ -48,27 +72,3 @@ func World(ctx context.Context, name string) (*Response, error) {
 type Response struct {
 	Message string
 }
-
-// ==================================================================
-
-// Encore comes with a built-in development dashboard for
-// exploring your API, viewing documentation, debugging with
-// distributed tracing, and more. Visit your API URL in the browser:
-//
-//     http://localhost:4000
-//
-
-// ==================================================================
-
-// Next steps
-//
-// 1. Deploy your application to the cloud with a single command:
-//
-//     git push encore
-//
-// 2. To continue exploring Encore, check out one of these topics:
-//
-//    Building a Slack bot:  https://encore.dev/docs/tutorials/slack-bot
-//    Building a REST API:   https://encore.dev/docs/tutorials/rest-api
-//    Using SQL databases:   https://encore.dev/docs/develop/databases
-//    Authenticating users:  https://encore.dev/docs/develop/auth
