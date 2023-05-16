@@ -5,22 +5,25 @@ import (
 	"crypto/x509"
 	"database/sql"
 	_ "embed"
-
-	//"errors"
-	//"fmt"
+	"encoding/json"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 
-	/*
-		"github.com/aws/aws-sdk-go-v2/config"
-		"github.com/aws/aws-sdk-go-v2/service/s3"
-		"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	*/
+	//"encore.dev/middleware"
+	"encore.dev/rlog"
+
 	"github.com/bokwoon95/sq"
+	"github.com/go-playground/validator/v10"
+	"github.com/gorilla/csrf"
+	"github.com/gorilla/mux"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/jackc/pgx/v4/stdlib"
+	_ "github.com/mattn/go-sqlite3"
 	"go4.org/syncutil"
+	"golang.org/x/crypto/bcrypt"
 )
 
 /*
@@ -53,18 +56,96 @@ var (
 //encore:service
 type Service struct {
 	// Add your dependencies here
-	svcdb *sql.DB
+	svcdb  *sql.DB
+	router *mux.Router
 }
+
+/*
+//encore:middleware global target=all
+func CsrfMiddleware(req middleware.Request, next middleware.Next) middleware.Response {
+	// If the payload has a Validate method, use it to validate the request.
+	payload := req.Data().Payload
+	if validator, ok := payload.(interface{ Validate() error }); ok {
+		if err := validator.Validate(); err != nil {
+			// If the validation fails, return an InvalidArgument error.
+			err = errs.WrapCode(err, errs.InvalidArgument, "validation failed")
+			return middleware.Response{Err: err}
+		}
+	}
+	return next(req)
+
+}
+*/
 
 func initService() (*Service, error) {
 	// Write your service initialization code here.
+
+	/*
+		r := mux.NewRouter()
+		csrfMiddleware := csrf.Protect([]byte("32-byte-long-auth-key"))
+
+		api := r.PathPrefix("/api").Subrouter()
+		api.Use(csrfMiddleware)
+		api.HandleFunc("/user/{id}", GetUser).Methods("GET")
+
+		http.ListenAndServe(":8000", r)
+	*/
+
 	svc := &Service{}
+
+	svc.router = mux.NewRouter()
+	//r := mux.NewRouter()
+	csrfMiddleware := csrf.Protect([]byte("32-byte-long-auth-key"))
+	api := svc.router.PathPrefix("/api").Subrouter()
+	api.Use(csrfMiddleware)
+	api.HandleFunc("/user/{id}", GetUser).Methods("GET")
+	http.ListenAndServe(":8000", svc.router)
+
 	err := svc.setup3(context.Background())
 	if err != nil {
 		log.Println("Error in initService, ", err)
 		return nil, err
 	}
 	return svc, nil
+}
+
+/*
+//encore:service
+type Service struct {
+	oldRouter *gin.Engine // existing HTTP router
+}
+
+// Route all requests to the existing HTTP router if no other endpoint matches.
+//
+//encore:api public raw path=/!fallback
+func (s *Service) Fallback(w http.ResponseWriter, req *http.Request) {
+	s.oldRouter.ServeHTTP(w, req)
+}
+*/
+
+//encore:api public raw path=/!fallback
+func (s *Service) Fallback(w http.ResponseWriter, req *http.Request) {
+	//s.oldRouter.ServeHTTP(w, req)
+	s.router.ServeHTTP(w, req)
+}
+
+// encor :api public raw method=POST path=/api/user
+func GetUser(w http.ResponseWriter, r *http.Request) {
+	// Authenticate the request, get the id from the route params,
+	// and fetch the user from the DB, etc.
+
+	// Get the token and pass it in the CSRF header. Our JSON-speaking client
+	// or JavaScript framework can now read the header and return the token in
+	// in its own "X-CSRF-Token" request header on the subsequent POST.
+	var user Usr
+	w.Header().Set("X-CSRF-Token", csrf.Token(r))
+	b, err := json.Marshal(user)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	w.Write(b)
 }
 
 func (s *Service) Shutdown(force context.Context) {
@@ -324,66 +405,123 @@ func (s *Service) World3(ctx context.Context, name string) (*Response, error) {
 	return &Response{Message: msg}, err
 }
 
-/*
-// LambdaHandler is the main AWS Lambda handler function
-//
-//encore:api public path=/lambda
-func LambdaHandler(ctx context.Context) error {
-	// Create a new S3 client
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion("us-east-1"), // Specify the AWS region
-	)
+func (s *Service) authenticate(username, password string) (bool, error) {
+	var hashedPassword string
+	err := s.svcdb.QueryRowContext(context.Background(), "SELECT password FROM users WHERE username = ?", username).Scan(&hashedPassword)
 	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %v", err)
-	}
-	client := s3.NewFromConfig(cfg)
-
-	// Define the S3 bucket and file information
-	bucket := "lambda-s3" //"your-bucket-name"
-	filename := "hello.txt"
-	content := "Hello World"
-
-	// Create the file locally
-	file, err := os.Create("/tmp/" + filename)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %v", err)
-	}
-	defer file.Close()
-
-	// Write content to the file
-	if _, err := file.WriteString(content); err != nil {
-		return fmt.Errorf("failed to write to file: %v", err)
-	}
-
-	// Check if the bucket already exists
-	_, err = client.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: &bucket,
-	})
-	if err != nil {
-		var createBucketErr *types.BucketAlreadyOwnedByYou
-		if !errors.As(err, &createBucketErr) {
-			// Create the bucket if it doesn't exist
-			_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
-				Bucket: &bucket,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to create S3 bucket: %v", err)
-			}
-			log.Printf("S3 bucket created: %s\n", bucket)
+		if err == sql.ErrNoRows {
+			return false, nil
 		}
+		return false, err
 	}
 
-	// Upload the file to S3
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: &bucket,
-		Key:    &filename,
-		Body:   file,
-	})
+	err = bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password))
 	if err != nil {
-		return fmt.Errorf("failed to upload file to S3: %v", err)
+		return false, nil
 	}
 
-	log.Printf("File uploaded successfully to S3 bucket: %s, filename: %s\n", bucket, filename)
-	return nil
+	return true, nil
 }
-*/
+
+type LoginForm struct {
+	Username string `validate:"required"`
+	Password string `validate:"required"`
+}
+
+//encore:api public raw method=POST path=/login
+func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
+
+	var form LoginForm
+	if err := r.ParseForm(); err != nil {
+		rlog.Error("Login ParseForm", err)
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	//log.Println(r.Form)
+
+	form.Username = r.Form.Get("username")
+	form.Password = r.Form.Get("password")
+
+	validate := validator.New()
+	if err := validate.Struct(form); err != nil {
+		rlog.Error("Login validate Struct form", err)
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	success, err := s.authenticate(form.Username, form.Password)
+	if err != nil {
+		rlog.Error("Login authenticate", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	if success {
+		fmt.Fprintf(w, "Success")
+	} else {
+		fmt.Fprintf(w, "Fail")
+	}
+
+}
+
+type Credentials struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+//encore:api public raw method=POST path=/adduser
+func (s *Service) AddUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	var credentials Credentials
+	err := decoder.Decode(&credentials)
+	if err != nil {
+		rlog.Error("AddUser credentials decode", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	// Hash the password
+	hashedPassword, err := hashPassword(credentials.Password)
+	if err != nil {
+		rlog.Error("AddUser hashedPassword", err)
+		http.Error(w, "Failed to hash password", http.StatusInternalServerError)
+		return
+	}
+
+	// Use pgx.Stdlib as the driver for sql.DB
+	pgxConn, err := stdlib.AcquireConn(s.svcdb)
+	if err != nil {
+		rlog.Error("AddUser stdlib.AcquireConn", err)
+		http.Error(w, "Failed to acquire connection", http.StatusInternalServerError)
+		return
+	}
+	defer stdlib.ReleaseConn(s.svcdb, pgxConn)
+
+	// Insert the credentials into the database
+	// TODO: fix this
+	sql := "insert into users(id, name, email, password, verified, created_at) values(2, $1, $2, $3, false, now())"
+	_, err = pgxConn.Exec(context.Background(), sql, credentials.Username, "user1@example.com", hashedPassword)
+	if err != nil {
+		rlog.Error("AddUser insert users", err)
+		http.Error(w, "Failed to insert credentials", http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Fprintf(w, "Credentials saved successfully")
+}
+
+func hashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
